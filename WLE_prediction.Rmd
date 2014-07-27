@@ -1,0 +1,250 @@
+```{r set-options, echo=FALSE, cache=FALSE}
+options(digits=7)
+```
+
+# Random Forest analysis of weight lifting exercise data
+
+<br>
+### Background
+Human Activity Recognition has gained large impact in recent years as a way to
+use modern computational methods to analyze physical activity of individuals
+from sensory data attached to them. 
+
+A specific case is the Weight Lifting Exercise Dataset published by the
+[Groupware@LES](http://groupware.les.inf.puc-rio.br/har#ixzz38VUg0q7q).  It
+contains sensory data from participants that were asked to perform one set of 10
+repetitions of biceps curls in five different fashions. The categories are
+specified on their
+[webpage](http://groupware.les.inf.puc-rio.br/har#ixzz38VUg0q7q) and are:
+exactly according to the specification (Class A), throwing the elbows to the
+front (Class B), lifting the dumbbell only halfway (Class C), lowering the
+dumbbell only halfway (Class D) and throwing the hips to the front (Class E).
+
+The aim is to quantify how accurate the participants are performing the barbell
+lifts by using data from accelerometers on the belt, forearm, arm, and dumbell of
+6 participants. 
+ 
+<br>
+### Preparation
+The data used here is a version of the dataset from the
+[webpage](http://groupware.les.inf.puc-rio.br/har#ixzz38VUg0q7q) that is divided
+into a training set that contains the classe column with the categories that
+should be predicted and a test set without this column.
+
+Before the start of the analysis the necessary libraries are loaded. I am using
+the Random Forest alogrithm and the caret package in R do perform the computations. 
+```{r, cache=TRUE}
+library(caret)
+```
+
+<br>
+### Data 
+The first step is to read in the training and test set. The data contains a lot of
+#DIV/0! entries. It is practical to convert them into NAs directly when reading
+from the files and treat them as missing data in the following. 
+```{r, cache=TRUE}
+train.data <- read.csv("pml-training.csv", na.strings=c("NA", "#DIV/0!"),
+                       row.names=1)
+testing <- read.csv("pml-testing.csv", na.strings=c("NA", "#DIV/0!"),
+                    row.names=1)
+```
+
+<br>
+Next, the data is partitioned and a validation set is produced. This will help to
+get an estimate for the out of sample error. Once the data is divided, the
+validation and test set are not looked at and the choices made for the
+computational details are exclusively based on the training set. They are then
+applied in the same manner to the validation and test set.
+```{r, cache=TRUE}
+set.seed(25)
+part <- createDataPartition(y=train.data$classe, p=0.8, list=FALSE)
+train.sub <- train.data[part, ]
+val.sub <- train.data[-part, ]
+training <- subset(train.sub, select=-classe)
+validation <- subset(val.sub, select=-classe)
+```
+
+<br>
+Let's take a look a the dimensions of the training and validation set.
+```{r, cache=TRUE}
+dim(training)
+dim(validation)
+```
+
+There are 158 variables and 15699 cases in the data set. Taking a closer look at
+the variables in the data set and their characteristics helps to produce clean
+and useful data that can be fed into the Random Forest algorithm.
+
+<br>
+### Data processing 
+In general it helps to produce different statistics of the individual variables
+to get a better feeling of the characteristics of the data. I will not mention
+every step of the process but focus on the resulting conclusions. It is
+noticeable that the data contains some columns that are either describing the
+individual who is performing the exercise (*user_name*) or descriptions of
+several time attributes of the exercise (for example *raw_timestamp_part_1* and
+*new_window*). I chose not to consider these variables.  Using too much
+information about the individual performing the exercise might help in
+reproducing the results from the training set very well but might produce a
+model that cannot generalize appropriately to other individuals. Furthermore it
+makes it easier to interpret the results when the variables can be distinctly
+assigned to a certain task performed by the participants.
+```{r, cache=TRUE}
+cols.rm <- c("user_name", "cvtd_timestamp", "raw_timestamp_part_1",
+             "raw_timestamp_part_2", "num_window", "new_window")
+sel.cols <- !(names(training) %in% cols.rm)
+training <- subset(training, select=sel.cols) 
+validation <- subset(validation, select=sel.cols) 
+testing <- subset(testing, select=sel.cols)
+```
+
+<br>
+In the next step all variables with zero variance are removed. The values of these variables
+are basically the same for all cases and therefore don't have any predictive power.
+```{r, cache=TRUE}
+nzv <- nearZeroVar(training, saveMetric=TRUE)
+training.wz <- training[, !nzv$zeroVar]
+validation.wz <- validation[, !nzv$zeroVar]
+testing.wz <- testing[, !nzv$zeroVar]
+```
+
+<br>
+Looking over the data set there appears to be a lot of missing values. To get a
+feeling for the distribution of the missing values across the the columns, the 
+percentage of values that are missing for each variable can be calculated. 
+```{r, cache=TRUE}
+na.ratio <- apply(training.wz, 2, function(x) sum(is.na(x))/nrow(training.wz))
+summary(na.ratio)
+```
+
+This distribution of the percentage of missing values indicates that there are
+columns of variables that barely have any missing values at all and columns that
+mostly consist of missing values. Let's remove the later and look at the
+dimensions of the remaining data set.
+```{r, cache=TRUE}
+training.left <- training.wz[, na.ratio < 0.96]
+validation.left <- validation.wz[, na.ratio < 0.96]
+testing.left <- testing.wz[, na.ratio < 0.96]
+sum(is.na(training.left))
+dim(training.left)
+```
+
+This seems to have helped quite a bit. There are now no missing values left and
+the number of values has decreased to 52 which reduces the computational time
+needed for the calculations.
+
+<br>
+### Random Forest approach
+We are now ready to apply a learning algorithm. I choose a Random Forest to
+analyze the dataset. 
+
+To estimate the computational time necessary for the analysis, first test
+calculations are performed for a varying number of trees, without cross
+validation and fine tuning of the parameters. The out of sample error is
+estimated with the out of bag error of the random forest.
+```{r, cache=TRUE}
+set.seed(1)
+ntrees <- c(seq(1, 10, by=1), seq(10, 100, by=10), 200, 300, 400, 500)
+times <- numeric()
+oob.errors <- numeric()
+
+tCtrl <- trainControl(method="oob")
+for (i in seq_along(ntrees)){
+  mod.rf <- train(x=training.left, y=train.sub$classe, 
+                  method="rf", ntree=ntrees[i], tuneLength=1, 
+                  trControl=tCtrl, preProcess=c("center", "scale"))
+ 
+  times <- c(times, mod.rf$times$everything["elapsed"])
+  oob.errors <- c(oob.errors, 1-mod.rf$results$Accuracy)
+}
+```
+
+<br>
+We can plot the results to check the accuracy of the calculation for each number of
+trees used.
+```{r, fig.width=8, fig.height=6, cache=TRUE}
+plot.data.rf <- data.frame(n=ntrees, RunningTime=times, error=oob.errors*100)
+g <- ggplot(data=plot.data.rf, aes(n, error, size=RunningTime)) 
+g <- g + geom_point(color="blue", alpha=0.5) 
+g <- g + scale_size(range=c(4, 10)) 
+g <- g + labs(x="number of trees", y="OOB error [%]")
+g <- g + theme_bw()
+g
+```
+
+It is clear from the plot that a too low number of trees would result in a
+significant loss of accuracy but that the results won't improve if more than a
+hundred trees are used.
+
+I therefore calculate the Random Forest with 100 trees and this time use a 10
+fold cross validation to estimate the out of sample error. Five different values
+for the parameter mtry are tested and the best one determined. 
+```{r, cache=TRUE}
+set.seed(1)
+tCtrl <- trainControl(method="cv", number=10)
+mod.rf <- train(x=training.left, y=train.sub$classe,
+                method="rf", ntree=100, tuneLength=5,
+                trControl=tCtrl, preProcess=c("center", "scale"))
+
+```
+
+After the calculations are done we can take a look at the estimated errors for
+the different values of mtry.
+```{r, cache=TRUE}
+mod.rf
+```
+
+The accuracy for all tried models is very high but the best result is achieved
+with a parameter of mtry=14. We can directly plot the train object to see the
+performance of the Random Forests for the different values of mtry that were
+tested in the model calculations. 
+```{r, fig.width=8, fig.height=6, cache=TRUE}
+plot(mod.rf)
+```
+
+<br>
+### Results
+The caret package saves the final model that was computed with the best fitting
+parameters in the train object. We can see how well it performed. 
+```{r, cache=TRUE}
+mod.rf$finalModel
+```
+
+The confusion matrix shows that there are only a few cases that are
+missclassified. The error rate is less than 1%! 
+
+Another thing that might be of interest is the importance of each variable for
+the calculations. Random Forests use a measure called MeanDecreaseGini that
+measures the [Gini
+decreases](http://www.stat.berkeley.edu/~breiman/RandomForests/cc_home.htm#giniimp)
+for each variable as an indicator for the importance of a variable. 
+```{r, fig.width=8, fig.height=8, cache=TRUE}
+importance <- importance(mod.rf$finalModel)[, 1]
+variables <- names(importance)
+ordering <- order(importance)
+variables <- variables[ordering]
+variables <- factor(variables, level=variables)
+importance <- importance[ordering]/max(importance)
+
+plot.data <- data.frame(variables=variables, importance=importance)
+g <- ggplot(data=plot.data, aes(x=variables, y=importance))
+g <- g + geom_bar(aes(width=0.8), stat="identity", fill="blue", alpha=0.5) 
+g <- g + coord_flip() 
+g <- g + theme_bw()
+g
+```
+
+It appears that the most important sensor is located at the belt while the data
+from the arm sensor has less influence on the predictions. 
+
+<br>
+Now it's time to use the validation set to get the prediction for an untouched
+set of data and get another and possibly better estimate for the out of sample error.
+```{r, cache=TRUE}
+pred.val <- predict(mod.rf, validation.left)
+confusionMatrix(pred.val, val.sub$classe)
+```
+The confusion matrix again shows very few missclassified values and the accuracy
+is almost a hundred percent. The Random Forest did very well on this kind of
+data and is able to predict the execution of the weight lifting exercise with a
+very low error rate.
